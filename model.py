@@ -15,30 +15,31 @@ class View(nn.Module):
 
 class VAE(nn.Module):
     """Encoder-Decoder architecture for both WAE-MMD and WAE-GAN."""
-    def __init__(self, z_dim=32, nc=3):
+    def __init__(self, z_dim=32, nc=3, class_probs=10):
         super(VAE, self).__init__()
         self.z_dim = z_dim
         self.nc = nc
+        self.class_probs = class_probs
         self.encoder = nn.Sequential(
-            nn.Conv2d(nc, 128, 4, 2, 1, bias=False),              # B,  128, 32, 32
+            nn.Conv2d(in_channels=nc, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False), # B,  128, 32, 32
             nn.BatchNorm2d(128),
             nn.ReLU(True),
-            nn.Conv2d(128, 256, 4, 2, 1, bias=False),             # B,  256, 16, 16
+            nn.Conv2d(128, 256, 4, 2, 1, bias=False),  # B,  256, 16, 16
             nn.BatchNorm2d(256),
             nn.ReLU(True),
-            nn.Conv2d(256, 512, 4, 2, 1, bias=False),             # B,  512,  8,  8
+            nn.Conv2d(256, 512, 4, 2, 1, bias=False),  # B,  512,  8,  8
             nn.BatchNorm2d(512),
             nn.ReLU(True),
-            nn.Conv2d(512, 1024, 4, 2, 1, bias=False),            # B, 1024,  4,  4
+            nn.Conv2d(512, 1024, 4, 2, 1, bias=False),  # B, 1024,  4,  4
             nn.BatchNorm2d(1024),
             nn.ReLU(True),
-            View((-1, 1024*2*2)),                                 # B, 1024*4*4
+            View((-1, 1024*2*2)),                      # B, 1024*4*4
         )
 
         self.fc_mu = nn.Linear(1024*2*2, z_dim)                            # B, z_dim
         self.fc_logvar = nn.Linear(1024*2*2, z_dim)                            # B, z_dim
         self.decoder = nn.Sequential(
-            nn.Linear(z_dim, 1024*4*4),                           # B, 1024*8*8
+            nn.Linear(z_dim + self.class_probs, 1024*4*4),                           # B, 1024*8*8
             View((-1, 1024, 4, 4)),                               # B, 1024,  8,  8
             nn.ConvTranspose2d(1024, 512, 4, 2, 1, bias=False),   # B,  512, 16, 16
             nn.BatchNorm2d(512),
@@ -52,6 +53,7 @@ class VAE(nn.Module):
             nn.ConvTranspose2d(128, nc, 1),                       # B,   nc, 64, 64
         )
         self.weight_init()
+        # self.fc_logvar.weight.data.uniform_()
 
     def weight_init(self):
         for block in self._modules:
@@ -61,11 +63,13 @@ class VAE(nn.Module):
             except:
                 kaiming_init(block)
 
-    def forward(self, x):
+    def forward(self, x, pred_probability):
         z = self._encode(x)
         mu, logvar = self.fc_mu(z), self.fc_logvar(z)
+
         z = self.reparameterize(mu, logvar)
-        x_recon = self._decode(z)
+        z_new = torch.cat((z, pred_probability), dim=1)
+        x_recon = self._decode(z_new)
 
         return x_recon, z, mu, logvar
 
@@ -86,11 +90,12 @@ class VAE(nn.Module):
 
 class Discriminator(nn.Module):
     """Adversary architecture(Discriminator) for WAE-GAN."""
-    def __init__(self, z_dim=10):
+    def __init__(self, z_dim=10, class_probs=10):
         super(Discriminator, self).__init__()
-        self.z_dim = z_dim
+        self.z_dim = z_dim + class_probs
+
         self.net = nn.Sequential(
-            nn.Linear(z_dim, 512),
+            nn.Linear(self.z_dim, 512),
             nn.ReLU(True),
             nn.Linear(512, 512),
             nn.ReLU(True),
@@ -104,8 +109,9 @@ class Discriminator(nn.Module):
             for m in self._modules[block]:
                 kaiming_init(m)
 
-    def forward(self, z):
-        return self.net(z)
+    def forward(self, z, pred_probability):
+        z_new = torch.cat((z, pred_probability), dim=1)
+        return self.net(z_new).squeeze()
 
 
 def kaiming_init(m):

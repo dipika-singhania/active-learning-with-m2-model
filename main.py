@@ -75,9 +75,9 @@ def main(args):
 
     # dataset with labels available
     querry_dataloader = data.DataLoader(train_dataset, sampler=sampler, 
-            batch_size=args.batch_size, drop_last=True)
+                                        batch_size=args.batch_size, drop_last=True)
     val_dataloader = data.DataLoader(train_dataset, sampler=val_sampler,
-            batch_size=args.batch_size, drop_last=False)
+                                     batch_size=args.batch_size, drop_last=False)
             
     args.cuda = args.cuda and torch.cuda.is_available()
     solver = Solver(args, test_dataloader)
@@ -87,38 +87,43 @@ def main(args):
     current_indices = list(initial_indices)
 
     accuracies = []
-    
-    for split in splits:
+    start = 0
+    if args.resume is True:
+        start = args.start_resume
+    for split in splits[start:]:
         # need to retrain all the models on the new images
         # re initialize and retrain the models
         task_model = vgg.vgg16_bn(num_classes=args.num_classes)
-        vae = model.VAE(args.latent_dim)
-        discriminator = model.Discriminator(args.latent_dim)
+        vae = model.VAE(z_dim=args.latent_dim, nc=3, class_probs=args.num_classes)
+        discriminator = model.Discriminator(z_dim=args.latent_dim, class_probs=args.num_classes)
 
         unlabeled_indices = np.setdiff1d(list(all_indices), current_indices)
         unlabeled_sampler = data.sampler.SubsetRandomSampler(unlabeled_indices)
-        unlabeled_dataloader = data.DataLoader(train_dataset, 
-                sampler=unlabeled_sampler, batch_size=args.batch_size, drop_last=False)
+        unlabeled_dataloader = data.DataLoader(train_dataset, sampler=unlabeled_sampler,
+                                               batch_size=args.batch_size, drop_last=False)
 
-        # train the models on the current data
-        acc, vae, discriminator = solver.train(querry_dataloader,
-                                               val_dataloader,
-                                               task_model, 
-                                               vae, 
-                                               discriminator,
-                                               unlabeled_dataloader)
-
-
-        print('Final accuracy with {}% of data is: {:.2f}'.format(int(split*100), acc))
+        if args.test_acc_only:
+            acc = solver.load_and_test(task_model, vae, discriminator, split)
+        else:
+            # train the models on the current data
+            acc = solver.train(querry_dataloader,
+                               val_dataloader,
+                               task_model,
+                               vae,
+                               discriminator,
+                               unlabeled_dataloader,
+                               split, p_resume=args.resume)
+        args.resume = False
+        print("Final accuracy with ", split * 100, " of data is: ", acc)
         accuracies.append(acc)
 
-        sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader)
+        sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader, task_model)
         current_indices = list(current_indices) + list(sampled_indices)
         sampler = data.sampler.SubsetRandomSampler(current_indices)
-        querry_dataloader = data.DataLoader(train_dataset, sampler=sampler, 
-                batch_size=args.batch_size, drop_last=True)
+        querry_dataloader = data.DataLoader(train_dataset, sampler=sampler, batch_size=args.batch_size, drop_last=True)
 
     torch.save(accuracies, os.path.join(args.out_path, args.log_name))
+
 
 if __name__ == '__main__':
     args = arguments.get_args()

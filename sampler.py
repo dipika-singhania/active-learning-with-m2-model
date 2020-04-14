@@ -2,12 +2,12 @@ import torch
 
 import numpy as np
 
+
 class AdversarySampler:
     def __init__(self, budget):
         self.budget = budget
 
-
-    def sample(self, vae, discriminator, data, cuda):
+    def sample(self, vae, discriminator, data, task_model, cuda):
         all_preds = []
         all_indices = []
 
@@ -16,8 +16,9 @@ class AdversarySampler:
                 images = images.cuda()
 
             with torch.no_grad():
-                _, _, mu, _ = vae(images)
-                preds = discriminator(mu)
+                pred_images = task_model(images)
+                _, _, mu, _ = vae(images, pred_images)
+                preds = discriminator(mu, pred_images)
 
             preds = preds.cpu().data
             all_preds.extend(preds)
@@ -33,4 +34,3 @@ class AdversarySampler:
         querry_pool_indices = np.asarray(all_indices)[querry_indices]
 
         return querry_pool_indices
-        
