@@ -7,7 +7,7 @@ class AdversarySampler:
     def __init__(self, budget):
         self.budget = budget
 
-    def sample(self, vae, discriminator, data, task_model, cuda):
+    def sample(self, vae, discriminator, data, cuda):
         all_preds = []
         all_indices = []
 
@@ -16,7 +16,7 @@ class AdversarySampler:
                 images = images.cuda()
 
             with torch.no_grad():
-                pred_images = task_model(images)
+                pred_images = vae.classify(images)
                 _, _, mu, _ = vae(images, pred_images)
                 preds = discriminator(mu, pred_images)
 

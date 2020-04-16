@@ -16,27 +16,34 @@ from utils import *
 import arguments
 
 
-def cifar_transformer():
-    return transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5,],
-                                std=[0.5, 0.5, 0.5]),
-        ])
-
 def main(args):
     args.cuda = True if torch.cuda.is_available() else False
-    if args.dataset == 'cifar10':
+    if args.dataset == 'MNIST':
         test_dataloader = data.DataLoader(
-                datasets.CIFAR10(args.data_path, download=True, transform=cifar_transformer(), train=False),
+            datasets.MNIST(args.data_path, download=True, transform=mnist_transformer(), train=False),
             batch_size=args.batch_size, drop_last=False)
 
-        train_dataset = CIFAR10(args.data_path)
-
+        train_dataset = MNIST(args.data_path)
+        print("Shape of one image = ", train_dataset.__getitem__(0)[0].shape)
         args.num_images = 50000
         args.num_val = 5000
         args.budget = 2500
         args.initial_budget = 5000
         args.num_classes = 10
+        x_dim = 784
+    elif args.dataset == 'cifar10':
+        test_dataloader = data.DataLoader(
+                datasets.CIFAR10(args.data_path, download=True, transform=cifar_transformer(), train=False),
+            batch_size=args.batch_size, drop_last=False)
+
+        train_dataset = CIFAR10(args.data_path)
+        args.num_images = 50000
+        args.num_val = 5000
+        args.budget = 2500
+        args.initial_budget = 5000
+        args.num_classes = 10
+        x_dim = 3 * 32 * 32
+
     elif args.dataset == 'cifar100':
         test_dataloader = data.DataLoader(
                 datasets.CIFAR100(args.data_path, download=True, transform=cifar_transformer(), train=False),
@@ -49,6 +56,7 @@ def main(args):
         args.budget = 2500
         args.initial_budget = 5000
         args.num_classes = 100
+        x_dim = 3 * 32 * 32
 
     elif args.dataset == 'imagenet':
         test_dataloader = data.DataLoader(
@@ -93,8 +101,11 @@ def main(args):
     for split in splits[start:]:
         # need to retrain all the models on the new images
         # re initialize and retrain the models
-        task_model = vgg.vgg16_bn(num_classes=args.num_classes)
-        vae = model.VAE(z_dim=args.latent_dim, nc=3, class_probs=args.num_classes)
+        # task_model = vgg.vgg16_bn(num_classes=args.num_classes)
+        # vae = model.VAE(z_dim=args.latent_dim, nc=3, class_probs=args.num_classes)
+        h_dim = [256, 128]
+        # task_model = None
+        vae = model.DeepGenerativeModel([x_dim, args.num_classes, args.latent_dim, h_dim])
         discriminator = model.Discriminator(z_dim=args.latent_dim, class_probs=args.num_classes)
 
         unlabeled_indices = np.setdiff1d(list(all_indices), current_indices)
@@ -103,12 +114,11 @@ def main(args):
                                                batch_size=args.batch_size, drop_last=False)
 
         if args.test_acc_only:
-            acc = solver.load_and_test(task_model, vae, discriminator, split)
+            acc = solver.load_and_test(vae, discriminator, split)
         else:
             # train the models on the current data
             acc = solver.train(querry_dataloader,
                                val_dataloader,
-                               task_model,
                                vae,
                                discriminator,
                                unlabeled_dataloader,
@@ -117,7 +127,7 @@ def main(args):
         print("Final accuracy with ", split * 100, " of data is: ", acc)
         accuracies.append(acc)
 
-        sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader, task_model)
+        sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader)
         current_indices = list(current_indices) + list(sampled_indices)
         sampler = data.sampler.SubsetRandomSampler(current_indices)
         querry_dataloader = data.DataLoader(train_dataset, sampler=sampler, batch_size=args.batch_size, drop_last=True)

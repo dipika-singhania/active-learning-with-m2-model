@@ -3,6 +3,273 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 
+import torch
+from torch.autograd import Variable
+import torch.nn as nn
+import torch.nn.functional as F
+
+import math
+import torch
+import torch.nn.functional as F
+
+
+def log_standard_gaussian(x):
+    """
+    Evaluates the log pdf of a standard normal distribution at x.
+    :param x: point to evaluate
+    :return: log N(x|0,I)
+    """
+    return torch.sum(-0.5 * math.log(2 * math.pi) - x ** 2 / 2, dim=-1)
+
+
+def log_gaussian(x, mu, log_var):
+    """
+    Returns the log pdf of a normal distribution parametrised
+    by mu and log_var evaluated at x.
+    :param x: point to evaluate
+    :param mu: mean of distribution
+    :param log_var: log variance of distribution
+    :return: log N(x|µ,σ)
+    """
+    log_pdf = - 0.5 * math.log(2 * math.pi) - log_var / 2 - (x - mu)**2 / (2 * torch.exp(log_var))
+    return torch.sum(log_pdf, dim=-1)
+
+
+def log_standard_categorical(p):
+    """
+    Calculates the cross entropy between a (one-hot) categorical vector
+    and a standard (uniform) categorical distribution.
+    :param p: one-hot categorical distribution
+    :return: H(p, u)
+    """
+    # Uniform prior over y
+    prior = F.softmax(torch.ones_like(p), dim=1)
+    prior.requires_grad = False
+
+    cross_entropy = -torch.sum(p * torch.log(prior + 1e-8), dim=1)
+
+    return cross_entropy
+
+
+class Stochastic(nn.Module):
+    """
+    Base stochastic layer that uses the
+    reparametrization trick [Kingma 2013]
+    to draw a sample from a distribution
+    parametrised by mu and log_var.
+    """
+    def reparametrize(self, mu, log_var):
+        epsilon = Variable(torch.randn(mu.size()), requires_grad=False)
+
+        if mu.is_cuda:
+            epsilon = epsilon.cuda()
+
+        # log_std = 0.5 * log_var
+        # std = exp(log_std)
+        std = log_var.mul(0.5).exp_()
+
+        # z = std * epsilon + mu
+        z = mu.addcmul(std, epsilon)
+
+        return z
+
+
+class GaussianSample(Stochastic):
+    """
+    Layer that represents a sample from a
+    Gaussian distribution.
+    """
+    def __init__(self, in_features, out_features):
+        super(GaussianSample, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.mu = nn.Linear(in_features, out_features)
+        self.log_var = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        mu = self.mu(x)
+        log_var = F.softplus(self.log_var(x))
+
+        return self.reparametrize(mu, log_var), mu, log_var
+
+
+class Perceptron(nn.Module):
+    def __init__(self, dims, activation_fn=F.relu, output_activation=None):
+        super(Perceptron, self).__init__()
+        self.dims = dims
+        self.activation_fn = activation_fn
+        self.output_activation = output_activation
+
+        self.layers = nn.ModuleList(list(map(lambda d: nn.Linear(*d), list(zip(dims, dims[1:])))))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i == len(self.layers)-1 and self.output_activation is not None:
+                x = self.output_activation(x)
+            else:
+                x = self.activation_fn(x)
+
+        return x
+
+
+class Encoder(nn.Module):
+    def __init__(self, dims, sample_layer=GaussianSample):
+        """
+        Inference network
+        Attempts to infer the probability distribution
+        p(z|x) from the data by fitting a variational
+        distribution q_φ(z|x). Returns the two parameters
+        of the distribution (µ, log σ²).
+        :param dims: dimensions of the networks
+           given by the number of neurons on the form
+           [input_dim, [hidden_dims], latent_dim].
+        """
+        super(Encoder, self).__init__()
+
+        [x_dim, h_dim, z_dim] = dims
+        neurons = [x_dim, *h_dim]
+        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+
+        self.hidden = nn.ModuleList(linear_layers)
+        self.sample = sample_layer(h_dim[-1], z_dim)
+
+    def forward(self, x):
+        for layer in self.hidden:
+            x = F.relu(layer(x))
+        return self.sample(x)
+
+
+class Decoder(nn.Module):
+    def __init__(self, dims):
+        """
+        Generative network
+        Generates samples from the original distribution
+        p(x) by transforming a latent representation, e.g.
+        by finding p_θ(x|z).
+        :param dims: dimensions of the networks
+            given by the number of neurons on the form
+            [latent_dim, [hidden_dims], input_dim].
+        """
+        super(Decoder, self).__init__()
+
+        [z_dim, h_dim, x_dim] = dims
+
+        neurons = [z_dim, *h_dim]
+        linear_layers = [nn.Linear(neurons[i-1], neurons[i]) for i in range(1, len(neurons))]
+        self.hidden = nn.ModuleList(linear_layers)
+
+        self.reconstruction = nn.Linear(h_dim[-1], x_dim)
+
+        self.output_activation = nn.Sigmoid()
+
+    def forward(self, x):
+        for layer in self.hidden:
+            x = F.relu(layer(x))
+        return self.output_activation(self.reconstruction(x))
+
+
+class VariationalAutoencoder(nn.Module):
+    def __init__(self, dims):
+        """
+        Variational Autoencoder [Kingma 2013] model
+        consisting of an encoder/decoder pair for which
+        a variational distribution is fitted to the
+        encoder. Also known as the M1 model in [Kingma 2014].
+        :param dims: x, z and hidden dimensions of the networks
+        """
+        super(VariationalAutoencoder, self).__init__()
+
+        [x_dim, z_dim, h_dim] = dims
+        self.z_dim = z_dim
+        self.flow = None
+
+        self.encoder = Encoder([x_dim, h_dim, z_dim])
+        self.decoder = Decoder([z_dim, list(reversed(h_dim)), x_dim])
+        self.kl_divergence = 0
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                init.xavier_normal(m.weight.data)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
+    def _kld(self, z, q_param, p_param=None):
+        """
+        Computes the KL-divergence of
+        some element z.
+        KL(q||p) = -∫ q(z) log [ p(z) / q(z) ]
+                 = -E[log p(z) - log q(z)]
+        :param z: sample from q-distribuion
+        :param q_param: (mu, log_var) of the q-distribution
+        :param p_param: (mu, log_var) of the p-distribution
+        :return: KL(q||p)
+        """
+        (mu, log_var) = q_param
+
+        if self.flow is not None:
+            f_z, log_det_z = self.flow(z)
+            qz = log_gaussian(z, mu, log_var) - sum(log_det_z)
+            z = f_z
+        else:
+            qz = log_gaussian(z, mu, log_var)
+
+        if p_param is None:
+            pz = log_standard_gaussian(z)
+        else:
+            (mu, log_var) = p_param
+            pz = log_gaussian(z, mu, log_var)
+
+        kl = qz - pz
+
+        return kl
+
+    def add_flow(self, flow):
+        self.flow = flow
+
+    def forward(self, x, y=None):
+        """
+        Runs a data point through the model in order
+        to provide its reconstruction and q distribution
+        parameters.
+        :param x: input data
+        :return: reconstructed input
+        """
+        z, z_mu, z_log_var = self.encoder(x)
+
+        self.kl_divergence = self._kld(z, (z_mu, z_log_var))
+
+        x_mu = self.decoder(z)
+
+        return x_mu
+
+    def sample(self, z):
+        """
+        Given z ~ N(0, I) generates a sample from
+        the learned distribution based on p_θ(x|z).
+        :param z: (torch.autograd.Variable) Random normal variable
+        :return: (torch.autograd.Variable) generated sample
+        """
+        return self.decoder(z)
+
+
+class Classifier(nn.Module):
+    def __init__(self, dims):
+        """
+        Single hidden layer classifier
+        with softmax output.
+        """
+        super(Classifier, self).__init__()
+        [x_dim, h_dim, y_dim] = dims
+        self.dense = nn.Linear(x_dim, h_dim)
+        self.logits = nn.Linear(h_dim, y_dim)
+
+    def forward(self, x):
+        x = F.relu(self.dense(x))
+        x = F.softmax(self.logits(x), dim=-1)
+        return x
+
 
 class View(nn.Module):
     def __init__(self, size):
@@ -10,7 +277,60 @@ class View(nn.Module):
         self.size = size
 
     def forward(self, tensor):
-        return tensor.view(self.size)
+        return tensor.view(-1, self.size)
+
+
+class DeepGenerativeModel(VariationalAutoencoder):
+    def __init__(self, dims):
+        """
+        M2 code replication from the paper
+        'Semi-Supervised Learning with Deep Generative Models'
+        (Kingma 2014) in PyTorch.
+        The "Generative semi-supervised model" is a probabilistic
+        model that incorporates label information in both
+        inference and generation.
+        Initialise a new generative model
+        :param dims: dimensions of x, y, z and hidden layers.
+        """
+        [x_dim, self.y_dim, z_dim, h_dim] = dims
+        super(DeepGenerativeModel, self).__init__([x_dim, z_dim, h_dim])
+        self.flatten = View(x_dim)
+        self.encoder = Encoder([x_dim + self.y_dim, h_dim, z_dim])
+        self.decoder = Decoder([z_dim + self.y_dim, list(reversed(h_dim)), x_dim])
+        self.classifier = Classifier([x_dim, h_dim[0], self.y_dim])
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                init.xavier_normal(m.weight.data)
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
+    def forward(self, x, y):
+        # Add label and data and generate latent variable
+        x = self.flatten(x)
+        z, z_mu, z_log_var = self.encoder(torch.cat([x, y], dim=1))
+
+        self.kl_divergence = self._kld(z, (z_mu, z_log_var))
+
+        # Reconstruct data point from latent data and label
+        x_mu = self.decoder(torch.cat([z, y], dim=1))
+        return x_mu, z, z_mu, z_log_var
+
+    def classify(self, x):
+        x = self.flatten(x)
+        logits = self.classifier(x)
+        return logits
+
+    def sample(self, z, y):
+        """
+        Samples from the Decoder to generate an x.
+        :param z: latent normal variable
+        :param y: label (one-hot encoded)
+        :return: x
+        """
+        y = y.float()
+        x = self.decoder(torch.cat([z, y], dim=1))
+        return x
 
 
 class VAE(nn.Module):
@@ -92,8 +412,8 @@ class Discriminator(nn.Module):
     """Adversary architecture(Discriminator) for WAE-GAN."""
     def __init__(self, z_dim=10, class_probs=10):
         super(Discriminator, self).__init__()
-        self.z_dim = z_dim + class_probs
-
+        # self.z_dim = z_dim + class_probs
+        self.z_dim = z_dim
         self.net = nn.Sequential(
             nn.Linear(self.z_dim, 512),
             nn.ReLU(True),
@@ -110,8 +430,8 @@ class Discriminator(nn.Module):
                 kaiming_init(m)
 
     def forward(self, z, pred_probability):
-        z_new = torch.cat((z, pred_probability), dim=1)
-        return self.net(z_new).squeeze()
+        # z_new = torch.cat((z, pred_probability), dim=1)
+        return self.net(z).squeeze()
 
 
 def kaiming_init(m):

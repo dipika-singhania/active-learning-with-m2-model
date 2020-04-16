@@ -22,6 +22,14 @@ def cifar10_transformer():
                                 std=[0.5, 0.5, 0.5]),
        ])
 
+
+def mnist_transformer():
+    return transforms.Compose([
+            transforms.ToTensor()
+            # transforms.Normalize(mean=(0.1307,), std=(0.3081,)),
+        ])
+
+
 class CIFAR10(Dataset):
     def __init__(self, path):
         self.cifar10 = datasets.CIFAR10(root=path,
@@ -60,6 +68,26 @@ class CIFAR100(Dataset):
 
     def __len__(self):
         return len(self.cifar100)
+
+class MNIST(Dataset):
+    def __init__(self, path):
+        self.mnist100 = datasets.MNIST(root=path,
+                                          download=True,
+                                          train=True,
+                                          transform=mnist_transformer())
+
+    def __getitem__(self, index):
+        if isinstance(index, numpy.float64):
+            index = index.astype(numpy.int64)
+
+        data, target = self.mnist100[index]
+
+        # Your transformations here (or set it in CIFAR10)
+
+        return data, target, index
+
+    def __len__(self):
+        return len(self.mnist100)
 
 
 class ImageNet(Dataset):
