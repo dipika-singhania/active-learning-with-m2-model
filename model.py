@@ -13,6 +13,16 @@ import torch
 import torch.nn.functional as F
 
 
+class PrintLayer(nn.Module):
+    def __init__(self, name):
+        super(PrintLayer, self).__init__()
+        self.name = name
+
+    def forward(self, x):
+        # Do your print / debug stuff here
+        print(self.name, ":", x.shape)
+        return x
+
 def log_standard_gaussian(x):
     """
     Evaluates the log pdf of a standard normal distribution at x.
@@ -94,27 +104,16 @@ class GaussianSample(Stochastic):
         return self.reparametrize(mu, log_var), mu, log_var
 
 
-class Perceptron(nn.Module):
-    def __init__(self, dims, activation_fn=F.relu, output_activation=None):
-        super(Perceptron, self).__init__()
-        self.dims = dims
-        self.activation_fn = activation_fn
-        self.output_activation = output_activation
+class View(nn.Module):
+    def __init__(self, size):
+        super(View, self).__init__()
+        self.size = size
 
-        self.layers = nn.ModuleList(list(map(lambda d: nn.Linear(*d), list(zip(dims, dims[1:])))))
-
-    def forward(self, x):
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
-            if i == len(self.layers)-1 and self.output_activation is not None:
-                x = self.output_activation(x)
-            else:
-                x = self.activation_fn(x)
-
-        return x
+    def forward(self, tensor):
+        return tensor.view(self.size)
 
 
-class Encoder(nn.Module):
+class LinearEncoder(nn.Module):
     def __init__(self, dims, sample_layer=GaussianSample):
         """
         Inference network
@@ -126,7 +125,7 @@ class Encoder(nn.Module):
            given by the number of neurons on the form
            [input_dim, [hidden_dims], latent_dim].
         """
-        super(Encoder, self).__init__()
+        super(LinearEncoder, self).__init__()
 
         [x_dim, h_dim, z_dim] = dims
         neurons = [x_dim, *h_dim]
@@ -141,7 +140,44 @@ class Encoder(nn.Module):
         return self.sample(x)
 
 
-class Decoder(nn.Module):
+class FashionMnistEncoder(nn.Module):
+    def __init__(self, dims, sample_layer=GaussianSample):
+        """
+        Inference network
+        Attempts to infer the probability distribution
+        p(z|x) from the data by fitting a variational
+        distribution q_φ(z|x). Returns the two parameters
+        of the distribution (µ, log σ²).
+        :param dims: dimensions of the networks
+           given by the number of neurons on the form
+           [input_dim, [hidden_dims], latent_dim].
+        """
+        super(FashionMnistEncoder, self).__init__()
+
+        [x_dim, h_dim, z_dim, y_dim] = dims
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=x_dim[0], out_channels=h_dim[0], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * x_dim[0] * x_dim[1] * x_dim[2], Output: bs * 64 * x_dim[1]/2 * x_dim[2]/2
+            nn.BatchNorm2d(h_dim[0]),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=h_dim[0], out_channels=h_dim[1], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * 64 * x_dim[1]/2 * x_dim[2]/2, Output: bs * 32 * x_dim[1]/4 * x_dim[2]/4
+            nn.BatchNorm2d(h_dim[1]),
+            nn.ReLU(True),
+            View((-1, h_dim[1] * x_dim[1]//4 * x_dim[2]//4)),
+            nn.Linear(h_dim[1] * x_dim[1]//4 * x_dim[2]//4, h_dim[-1]),
+            nn.BatchNorm1d(h_dim[-1]),
+            nn.ReLU(True),
+        )
+
+        self.sample = sample_layer(h_dim[-1] + y_dim, z_dim)
+
+    def forward(self, x, y):
+        x = self.encoder(x)
+        return self.sample(torch.cat([x, y], dim=-1))
+
+
+class LinearDecoder(nn.Module):
     def __init__(self, dims):
         """
         Generative network
@@ -152,7 +188,7 @@ class Decoder(nn.Module):
             given by the number of neurons on the form
             [latent_dim, [hidden_dims], input_dim].
         """
-        super(Decoder, self).__init__()
+        super(LinearDecoder, self).__init__()
 
         [z_dim, h_dim, x_dim] = dims
 
@@ -170,8 +206,44 @@ class Decoder(nn.Module):
         return self.output_activation(self.reconstruction(x))
 
 
-class VariationalAutoencoder(nn.Module):
+class FashionMnistDecoder(nn.Module):
     def __init__(self, dims):
+        """
+        Generative network
+        Generates samples from the original distribution
+        p(x) by transforming a latent representation, e.g.
+        by finding p_θ(x|z).
+        :param dims: dimensions of the networks
+            given by the number of neurons on the form
+            [latent_dim, [hidden_dims], input_dim].
+        """
+        super(FashionMnistDecoder, self).__init__()
+
+        [x_dim, h_dim, z_dim] = dims
+        self.up_sample = nn.Linear(z_dim, h_dim[-1])
+        self.decoder = nn.Sequential(
+            nn.Linear(h_dim[-1], h_dim[1] * x_dim[1] // 4 * x_dim[2] // 4),
+            nn.BatchNorm1d(h_dim[1] * x_dim[1] // 4 * x_dim[2] // 4),
+            nn.ReLU(True),
+            View((-1, h_dim[1], x_dim[1] // 4,  x_dim[2] // 4)),
+            nn.ConvTranspose2d(in_channels=h_dim[1], out_channels=h_dim[0], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * 32 * x_dim[1]/4 * x_dim[2]/4 Output: bs * 64 * x_dim[1]/2 * x_dim[2]/2
+            nn.BatchNorm2d(h_dim[0]),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(in_channels=h_dim[0], out_channels=x_dim[0], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * 64 * x_dim[1]/2 * x_dim[2]/2, Output: bs * x_dim[0] * x_dim[1] * x_dim[2],
+        )
+
+        self.output_activation = nn.Sigmoid()
+
+    def forward(self, x):
+        upscale_x = self.up_sample(x)
+        recon_x = self.decoder(upscale_x)
+        return self.output_activation(recon_x)
+
+
+class VariationalAutoEncoder(nn.Module):
+    def __init__(self, dims, dataset):
         """
         Variational Autoencoder [Kingma 2013] model
         consisting of an encoder/decoder pair for which
@@ -179,14 +251,19 @@ class VariationalAutoencoder(nn.Module):
         encoder. Also known as the M1 model in [Kingma 2014].
         :param dims: x, z and hidden dimensions of the networks
         """
-        super(VariationalAutoencoder, self).__init__()
+        super(VariationalAutoEncoder, self).__init__()
 
         [x_dim, z_dim, h_dim] = dims
         self.z_dim = z_dim
         self.flow = None
+        if dataset is 'MNIST':
+            self.encoder = LinearEncoder([x_dim, h_dim, z_dim])
+            self.decoder = LinearDecoder([z_dim, list(reversed(h_dim)), x_dim])
+        elif dataset == 'FashionMNIST':
+            self.encoder = FashionMnistEncoder([x_dim, h_dim, z_dim, self.y_dim])
+            self.decoder = FashionMnistDecoder([x_dim, h_dim, z_dim + self.y_dim])
+            self.classifier = FashionMnistClassifier([x_dim, h_dim, self.y_dim])
 
-        self.encoder = Encoder([x_dim, h_dim, z_dim])
-        self.decoder = Decoder([z_dim, list(reversed(h_dim)), x_dim])
         self.kl_divergence = 0
 
         for m in self.modules():
@@ -254,13 +331,44 @@ class VariationalAutoencoder(nn.Module):
         return self.decoder(z)
 
 
-class Classifier(nn.Module):
+class FashionMnistClassifier(nn.Module):
     def __init__(self, dims):
         """
         Single hidden layer classifier
         with softmax output.
         """
-        super(Classifier, self).__init__()
+        super(FashionMnistClassifier, self).__init__()
+        [x_dim, h_dim, y_dim] = dims
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels=x_dim[0], out_channels=h_dim[0], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * x_dim[0] * x_dim[1] * x_dim[2], Output: bs * 64 * x_dim[1]/2 * x_dim[2]/2
+            nn.BatchNorm2d(h_dim[0]),
+            nn.ReLU(True),
+            nn.Conv2d(in_channels=h_dim[0], out_channels=h_dim[1], kernel_size=4, stride=2, padding=1, bias=False),
+            # Input : bs * 64 * x_dim[1]/2 * x_dim[2]/2, Output: bs * 32 * x_dim[1]/4 * x_dim[2]/4
+            nn.BatchNorm2d(h_dim[1]),
+            nn.ReLU(True),
+            View((-1, h_dim[1] * x_dim[1] // 4 * x_dim[2] // 4)),
+            nn.Linear(h_dim[1] * x_dim[1] // 4 * x_dim[2] // 4, h_dim[-1]),
+            nn.BatchNorm1d(h_dim[-1]),
+            nn.ReLU(True),
+        )
+        self.final_layer = nn.Linear(h_dim[-1], y_dim)
+        PrintLayer("FinalLater"),
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = F.softmax(self.final_layer(x), dim=-1)
+        return x
+
+
+class LinearClassifier(nn.Module):
+    def __init__(self, dims):
+        """
+        Single hidden layer classifier
+        with softmax output.
+        """
+        super(LinearClassifier, self).__init__()
         [x_dim, h_dim, y_dim] = dims
         self.dense = nn.Linear(x_dim, h_dim)
         self.logits = nn.Linear(h_dim, y_dim)
@@ -271,17 +379,8 @@ class Classifier(nn.Module):
         return x
 
 
-class View(nn.Module):
-    def __init__(self, size):
-        super(View, self).__init__()
-        self.size = size
-
-    def forward(self, tensor):
-        return tensor.view(-1, self.size)
-
-
-class DeepGenerativeModel(VariationalAutoencoder):
-    def __init__(self, dims):
+class DeepGenerativeModel(VariationalAutoEncoder):
+    def __init__(self, dims, dataset):
         """
         M2 code replication from the paper
         'Semi-Supervised Learning with Deep Generative Models'
@@ -293,11 +392,18 @@ class DeepGenerativeModel(VariationalAutoencoder):
         :param dims: dimensions of x, y, z and hidden layers.
         """
         [x_dim, self.y_dim, z_dim, h_dim] = dims
-        super(DeepGenerativeModel, self).__init__([x_dim, z_dim, h_dim])
-        self.flatten = View(x_dim)
-        self.encoder = Encoder([x_dim + self.y_dim, h_dim, z_dim])
-        self.decoder = Decoder([z_dim + self.y_dim, list(reversed(h_dim)), x_dim])
-        self.classifier = Classifier([x_dim, h_dim[0], self.y_dim])
+        super(DeepGenerativeModel, self).__init__([x_dim, z_dim, h_dim], dataset)
+
+        self.dataset = dataset
+        if dataset == 'MNIST':
+            self.flatten = View((-1, x_dim))
+            self.encoder = LinearEncoder([x_dim + self.y_dim, h_dim, z_dim])
+            self.decoder = LinearDecoder([z_dim + self.y_dim, list(reversed(h_dim)), x_dim])
+            self.classifier = LinearClassifier([x_dim, h_dim[0], self.y_dim])
+        elif dataset == 'FashionMNIST':
+            self.encoder = FashionMnistEncoder([x_dim, h_dim, z_dim, self.y_dim])
+            self.decoder = FashionMnistDecoder([x_dim, h_dim, z_dim + self.y_dim])
+            self.classifier = FashionMnistClassifier([x_dim, h_dim, self.y_dim])
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -307,8 +413,11 @@ class DeepGenerativeModel(VariationalAutoencoder):
 
     def forward(self, x, y):
         # Add label and data and generate latent variable
-        x = self.flatten(x)
-        z, z_mu, z_log_var = self.encoder(torch.cat([x, y], dim=1))
+        if self.dataset == 'MNIST':
+            x = self.flatten(x)
+            z, z_mu, z_log_var = self.encoder(torch.cat([x, y], dim=1))
+        else:
+            z, z_mu, z_log_var = self.encoder(x, y)
 
         self.kl_divergence = self._kld(z, (z_mu, z_log_var))
 
@@ -317,7 +426,8 @@ class DeepGenerativeModel(VariationalAutoencoder):
         return x_mu, z, z_mu, z_log_var
 
     def classify(self, x):
-        x = self.flatten(x)
+        if self.dataset == 'MNIST':
+            x = self.flatten(x)
         logits = self.classifier(x)
         return logits
 
@@ -333,6 +443,55 @@ class DeepGenerativeModel(VariationalAutoencoder):
         return x
 
 
+class Discriminator(nn.Module):
+    """Adversary architecture(Discriminator) for WAE-GAN."""
+    def __init__(self, z_dim=10, class_probs=10):
+        super(Discriminator, self).__init__()
+        self.z_dim = z_dim + class_probs
+        # self.z_dim = z_dim
+        self.net = nn.Sequential(
+            nn.Linear(self.z_dim, 256),
+            nn.ReLU(True),
+            # nn.Linear(512, 512),
+            # nn.ReLU(True),
+            nn.Linear(256, 1),
+            nn.Sigmoid()
+        )
+        self.weight_init()
+
+    def weight_init(self):
+        for block in self._modules:
+            for m in self._modules[block]:
+                kaiming_init(m)
+
+    def forward(self, z, pred_probability):
+        z_new = torch.cat((z, pred_probability), dim=1)
+        return self.net(z_new).squeeze()
+
+
+def kaiming_init(m):
+    if isinstance(m, (nn.Linear, nn.Conv2d)):
+        init.kaiming_normal(m.weight)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
+    elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        m.weight.data.fill_(1)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
+
+
+def normal_init(m, mean, std):
+    if isinstance(m, (nn.Linear, nn.Conv2d)):
+        m.weight.data.normal_(mean, std)
+        if m.bias.data is not None:
+            m.bias.data.zero_()
+    elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+        m.weight.data.fill_(1)
+        if m.bias.data is not None:
+            m.bias.data.zero_()
+
+
+
 class VAE(nn.Module):
     """Encoder-Decoder architecture for both WAE-MMD and WAE-GAN."""
     def __init__(self, z_dim=32, nc=3, class_probs=10):
@@ -341,7 +500,7 @@ class VAE(nn.Module):
         self.nc = nc
         self.class_probs = class_probs
         self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels=nc, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False), # B,  128, 32, 32
+            nn.Conv2d(in_channels=nc, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),  # B,  128, 32, 32
             nn.BatchNorm2d(128),
             nn.ReLU(True),
             nn.Conv2d(128, 256, 4, 2, 1, bias=False),  # B,  256, 16, 16
@@ -353,7 +512,7 @@ class VAE(nn.Module):
             nn.Conv2d(512, 1024, 4, 2, 1, bias=False),  # B, 1024,  4,  4
             nn.BatchNorm2d(1024),
             nn.ReLU(True),
-            View((-1, 1024*2*2)),                      # B, 1024*4*4
+            View((-1, 1024*2*2)),                       # B, 1024*4*4
         )
 
         self.fc_mu = nn.Linear(1024*2*2, z_dim)                            # B, z_dim
@@ -407,50 +566,3 @@ class VAE(nn.Module):
     def _decode(self, z):
         return self.decoder(z)
 
-
-class Discriminator(nn.Module):
-    """Adversary architecture(Discriminator) for WAE-GAN."""
-    def __init__(self, z_dim=10, class_probs=10):
-        super(Discriminator, self).__init__()
-        # self.z_dim = z_dim + class_probs
-        self.z_dim = z_dim
-        self.net = nn.Sequential(
-            nn.Linear(self.z_dim, 512),
-            nn.ReLU(True),
-            nn.Linear(512, 512),
-            nn.ReLU(True),
-            nn.Linear(512, 1),
-            nn.Sigmoid()
-        )
-        self.weight_init()
-
-    def weight_init(self):
-        for block in self._modules:
-            for m in self._modules[block]:
-                kaiming_init(m)
-
-    def forward(self, z, pred_probability):
-        # z_new = torch.cat((z, pred_probability), dim=1)
-        return self.net(z).squeeze()
-
-
-def kaiming_init(m):
-    if isinstance(m, (nn.Linear, nn.Conv2d)):
-        init.kaiming_normal(m.weight)
-        if m.bias is not None:
-            m.bias.data.fill_(0)
-    elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
-        m.weight.data.fill_(1)
-        if m.bias is not None:
-            m.bias.data.fill_(0)
-
-
-def normal_init(m, mean, std):
-    if isinstance(m, (nn.Linear, nn.Conv2d)):
-        m.weight.data.normal_(mean, std)
-        if m.bias.data is not None:
-            m.bias.data.zero_()
-    elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
-        m.weight.data.fill_(1)
-        if m.bias.data is not None:
-            m.bias.data.zero_()
