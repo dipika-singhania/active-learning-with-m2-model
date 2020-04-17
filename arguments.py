@@ -13,7 +13,7 @@ def get_args():
     parser.add_argument('--num_adv_steps', type=int, default=1, help='Number of adversary steps taken for every task model step')
     parser.add_argument('--num_vae_steps', type=int, default=1, help='Number of VAE steps taken for every task model step')
     parser.add_argument('--adversary_param', type=float, default=1, help='Hyperparameter for training. lambda2 in the paper')
-    parser.add_argument('--out_path', type=str, default='/mnt/data/captioning_dataset/active_learning/results/', help='Path to where the output log will be')
+    parser.add_argument('--out_path', type=str, default='/mnt/data/captioning_dataset/active_learning/results_rmy/', help='Path to where the output log will be')
     parser.add_argument('--log_name', type=str, default='accuracies_cifar_100.log', help='Final performance of the models will be saved with this name')
     parser.add_argument('--test_acc_only', action='store_true', help="Pick up model and test accuracy on test data")
     parser.add_argument('--resume', action='store_true', help="Pick up model and test accuracy on test data")
