@@ -44,12 +44,12 @@ def main(args):
         args.num_images = 60000
         args.num_val = 5000
         args.budget = 1000
-        args.initial_budget = 1000
+        args.initial_budget = 12000
         args.num_classes = 10
         x_dim = [1, 28, 28]
         h_dim = [64, 32, 512]
         args.lr_vae = 3e-4
-        args.lr_ad = 1e-1
+        args.lr_ad = 1
 
     elif args.dataset == 'cifar10':
         test_dataloader = data.DataLoader(
@@ -96,6 +96,7 @@ def main(args):
     else:
         raise NotImplementedError
 
+    random.seed(1234)
     args.out_path = os.path.join(args.out_path, args.dataset)
     if not os.path.exists(args.out_path):
         os.mkdir(args.out_path)
@@ -138,15 +139,22 @@ def main(args):
         # task_model = vgg.vgg16_bn(num_classes=args.num_classes)
         # vae = model.VAE(z_dim=args.latent_dim, nc=3, class_probs=args.num_classes)
         # task_model = None
-        vae = model.DeepGenerativeModel([x_dim, args.num_classes, args.latent_dim, h_dim], args.dataset)
-        discriminator = model.Discriminator(z_dim=args.latent_dim, class_probs=args.num_classes)
+        if args.m1_model:
+            vae = model.VariationalAutoEncoder([x_dim, args.num_classes, args.latent_dim, h_dim], args.dataset)
+            discriminator = model.Discriminator(z_dim=args.latent_dim, class_probs=0)
+        else:
+            vae = model.DeepGenerativeModel([x_dim, args.num_classes, args.latent_dim, h_dim], args.dataset)
+            discriminator = model.Discriminator(z_dim=args.latent_dim, class_probs=args.num_classes)
 
         unlabeled_indices = np.setdiff1d(list(all_indices), current_indices)
         unlabeled_sampler = data.sampler.SubsetRandomSampler(unlabeled_indices)
         unlabeled_dataloader = data.DataLoader(train_dataset, sampler=unlabeled_sampler,
                                                batch_size=args.batch_size, drop_last=False)
 
-        if args.find_lr_vae:
+        if args.visualization:
+            solver.load_and_see_few_iamges(vae, discriminator, split)
+            acc = 0
+        elif args.find_lr_vae:
             solver.lr_finder_vae(querry_dataloader, unlabeled_dataloader, vae, discriminator)
             acc = 0
         elif args.find_lr_ad:
@@ -164,8 +172,9 @@ def main(args):
                                split, p_resume=args.resume)
         args.resume = False
         print("Final accuracy with ", split * args.num_images, "images of data is: ", acc)
-        with open(output_file_name, 'a+') as fp:
-            fp.write("Final accuracy with " + str(split * args.num_images) + "images of data is: " + str(acc) + "\n")
+        if not args.test_acc_only:
+            with open(output_file_name, 'a+') as fp:
+                fp.write("Final accuracy with " + str(split * args.num_images) + "images of data is: " + str(acc) + "\n")
         accuracies.append(acc)
 
         sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader)

@@ -263,7 +263,7 @@ class VariationalAutoEncoder(nn.Module):
             self.decoder = LinearDecoder([z_dim, list(reversed(h_dim)), x_dim])
         elif dataset == 'FashionMNIST':
             self.encoder = FashionMnistEncoder([x_dim, h_dim, z_dim, self.y_dim])
-            self.decoder = FashionMnistDecoder([x_dim, h_dim, z_dim + self.y_dim])
+            self.decoder = FashionMnistDecoder([x_dim, h_dim, z_dim])
             self.classifier = FashionMnistClassifier([x_dim, h_dim, self.y_dim])
 
         self.kl_divergence = 0
@@ -452,11 +452,13 @@ class Discriminator(nn.Module):
         self.z_dim = z_dim + class_probs
         # self.z_dim = z_dim
         self.net = nn.Sequential(
-            nn.Linear(self.z_dim, 256),
+            nn.Linear(self.z_dim, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(True),
-            # nn.Linear(512, 512),
-            # nn.ReLU(True),
-            nn.Linear(256, 1),
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(True),
+            nn.Linear(512, 1),
             nn.Sigmoid()
         )
         self.weight_init()

@@ -174,8 +174,8 @@ class LRFinderDiscrim(object):
             _, _, mu, _ = self.model[0](inputs[0], discrim_pred_labelled)
             _, _, unlab_mu, _ = self.model[0](inputs[1], discrim_pred_unlabelled)
         self.model[0].train()
-        labeled_preds = self.model[1](mu, discrim_pred_labelled)
-        unlabeled_preds = self.model[1](unlab_mu, discrim_pred_unlabelled)
+        labeled_preds = self.model[1](mu, torch.log(discrim_pred_labelled))
+        unlabeled_preds = self.model[1](unlab_mu, torch.log(discrim_pred_unlabelled))
 
         lab_real_preds = torch.ones(inputs[0].size(0))
         unlab_fake_preds = torch.zeros(inputs[1].size(0))
