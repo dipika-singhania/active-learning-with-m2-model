@@ -241,7 +241,7 @@ class Solver:
 
             if iter_count % 100 == 0:
                 if self.args.tensorboard:
-                    print_tensorboard_results(self.writer_val, iter_count, size_of_labeled_data * 100, {
+                    print_tensorboard_results(self.writer_train, iter_count, size_of_labeled_data * 100, {
                         'task_loss': task_loss.item(),
                         'total_vae_loss': total_vae_loss.item(),
                         'dcs_loss': dsc_loss.item()

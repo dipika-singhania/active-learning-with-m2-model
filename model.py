@@ -170,11 +170,13 @@ class FashionMnistEncoder(nn.Module):
             nn.ReLU(True),
         )
 
-        self.sample = sample_layer(h_dim[-1] + y_dim, z_dim)
+        # self.sample = sample_layer(h_dim[-1] + y_dim, z_dim)
+        self.sample = sample_layer(h_dim[-1], z_dim)
 
     def forward(self, x, y):
         x = self.encoder(x)
-        return self.sample(torch.cat([x, y], dim=-1))
+        # return self.sample(torch.cat([x, y], dim=-1))
+        return self.sample(x)
 
 
 class LinearDecoder(nn.Module):
