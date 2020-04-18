@@ -15,8 +15,9 @@ import matplotlib.pyplot as plt
 from torch.autograd import Variable
 import sys
 
+
 def print_tensorboard_results(epoch_writer, iteration, amt_data, dict_params):
-    label_base = 'amt_data_' + str(amt_data)
+    label_base = 'amt_data_' + '{:5d}'.format(amt_data)
     epoch_writer.add_scalars(label_base, dict_params, iteration)
 
 
@@ -93,10 +94,9 @@ class Solver:
                 for img, _, _ in dataloader:
                     yield img
 
-    def lr_finder_vae(self, querry_dataloader, unlabeled_dataloader, vae, discriminator):
+    def lr_finder_vae(self, querry_dataloader, unlabeled_dataloader, vae, discriminator, optim_vae):
         labeled_data = self.read_data(querry_dataloader)
         unlabeled_data = self.read_data(unlabeled_dataloader, labels=False)
-        optim_vae = optim.Adam(vae.parameters(), lr=5e-8)
         vae.train()
         discriminator.train()
 
@@ -104,7 +104,7 @@ class Solver:
             vae = vae.cuda()
 
         device = torch.device('cuda:0') if self.args.cuda else torch.device('cpu')
-        lr_finder = LRFinder(model=vae, optimizer=optim_vae, criterion=[self.ce_loss, self.mse_loss], \
+        lr_finder = LRFinder(model=vae, optimizer=optim_vae, criterion=[self.ce_loss, self.mse_loss],\
                              device=device)
         lr_finder.range_test([labeled_data, unlabeled_data], end_lr=10, num_iter=200, step_mode="exp")
         lr_finder.plot(fname='lr_probing_vae' + self.args.dataset + '.pdf')
@@ -125,22 +125,18 @@ class Solver:
         # load_checkpoint(self.model_path, l_name, vae, discriminator, optim_vae, optim_discriminator, True)
 
         device = torch.device('cuda:0') if self.args.cuda else torch.device('cpu')
-        lr_finder = LRFinderDiscrim(model=[vae, discriminator], optimizer=optim_discriminator, criterion=self.bce_loss, \
+        lr_finder = LRFinderDiscrim(model=[vae, discriminator], optimizer=optim_discriminator, criterion=self.bce_loss,\
                              device=device)
         lr_finder.range_test([labeled_data, unlabeled_data], end_lr=10, num_iter=200, step_mode="exp")
         lr_finder.plot(fname='lr_probing_discriminator' + self.args.dataset + '.pdf')
         sys.exit(1)
 
-    def train(self, querry_dataloader, val_dataloader, vae, discriminator, unlabeled_dataloader,
-              size_of_labeled_data, p_resume):
+    def train(self, querry_dataloader, val_dataloader, vae, discriminator, optim_vae, optim_discriminator,
+              unlabeled_dataloader, size_of_labeled_data, p_resume):
         self.args.train_iterations = (self.args.num_images * self.args.train_epochs) // self.args.batch_size
         labeled_data = self.read_data(querry_dataloader)
         unlabeled_data = self.read_data(unlabeled_dataloader, labels=False)
-        l_name = self.base_name + "_" + str(size_of_labeled_data * 100)
-
-        optim_vae = optim.Adam(vae.parameters(), lr=self.args.lr_vae)
-        # optim_task_model = optim.SGD(task_model.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)
-        optim_discriminator = optim.Adam(discriminator.parameters(), lr=self.args.lr_ad)
+        l_name = self.base_name + "_" + "{:5d}".format(size_of_labeled_data)
 
         vae.train()
         discriminator.train()
@@ -179,8 +175,8 @@ class Solver:
                 unlab_recon, unlab_z, unlab_mu, unlab_logvar = vae(unlabeled_imgs, preds_unlabelled)
                 transductive_loss = self.vae_loss(unlabeled_imgs, unlab_recon, unlab_mu, unlab_logvar, self.args.beta)
 
-                labeled_preds = discriminator(mu, preds_labelled)
-                unlabeled_preds = discriminator(unlab_mu, preds_unlabelled)
+                labeled_preds = discriminator(mu, torch.log(preds_labelled + 1e-15))
+                unlabeled_preds = discriminator(unlab_mu, torch.log(preds_unlabelled + 1e-15))
                 
                 lab_real_preds = torch.ones(labeled_imgs.size(0))
                 unlab_real_preds = torch.ones(unlabeled_imgs.size(0))
@@ -218,8 +214,8 @@ class Solver:
                     _, _, mu, _ = vae(labeled_imgs, discrim_pred_labelled)
                     _, _, unlab_mu, _ = vae(unlabeled_imgs, discrim_pred_unlabelled)
                 
-                labeled_preds = discriminator(mu, discrim_pred_labelled)
-                unlabeled_preds = discriminator(unlab_mu, discrim_pred_unlabelled)
+                labeled_preds = discriminator(mu, torch.log(discrim_pred_labelled + 1e-15))
+                unlabeled_preds = discriminator(unlab_mu, torch.log(discrim_pred_unlabelled + 1e-15))
                 
                 lab_real_preds = torch.ones(labeled_imgs.size(0))
                 unlab_fake_preds = torch.zeros(unlabeled_imgs.size(0))
@@ -247,7 +243,7 @@ class Solver:
 
             if iter_count % 100 == 0:
                 if self.args.tensorboard:
-                    print_tensorboard_results(self.writer_train, iter_count, size_of_labeled_data * 100, {
+                    print_tensorboard_results(self.writer_train, iter_count, size_of_labeled_data, {
                         'task_loss': task_loss.item(),
                         'total_vae_loss': total_vae_loss.item(),
                         'dcs_loss': dsc_loss.item()
@@ -260,7 +256,7 @@ class Solver:
             if iter_count % 100 == 0:
                 acc = self.validate(vae, val_dataloader)
                 if self.args.tensorboard:
-                    print_tensorboard_results(self.writer_val, iter_count, size_of_labeled_data * 100, {'acc': acc})
+                    print_tensorboard_results(self.writer_val, iter_count, size_of_labeled_data, {'acc': acc})
                 if acc > best_acc:
                     best_acc = acc
                     best_model = copy.deepcopy(vae)
@@ -274,8 +270,8 @@ class Solver:
                 
             if iter_count % 1000 == 0:
                 final_accuracy = self.test(best_model)
-                print('Completed {:5.2f} epochs, test best acc using {:2.2f} data is: {:2.2f}'.format((iter_count / self.args.num_images),
-                                                                                  size_of_labeled_data * 100, final_accuracy))
+                print('Completed {:5.2f} epochs, test best acc using {:5d} data is: {:2.2f}'.format((iter_count / self.args.num_images),
+                                                                                  size_of_labeled_data, final_accuracy))
                 print('best validation acc: ', best_acc)
                 if not self.args.test_acc_only:
                     save_model(self.model_path, l_name, vae, discriminator, optim_vae,
@@ -296,11 +292,15 @@ class Solver:
 
         return querry_indices
 
-    def load_and_test(self, vae, discriminator, size_of_labeled_data):
-        optim_vae = optim.Adam(vae.parameters(), lr=5e-4)
+    def random_sampling(self, unlabeled_dataloader):
+        querry_indices = self.sampler.sample(None, None, unlabeled_dataloader,
+                                             self.args.cuda)
+
+        return querry_indices
+
+    def load_and_test(self, vae, discriminator, optim_vae, optim_discriminator, size_of_labeled_data):
         # optim_task_model = optim.SGD(task_model.parameters(), lr=5e-4, weight_decay=5e-4, momentum=0.9)
-        optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
-        l_name = self.base_name + "_" + str(size_of_labeled_data * 100)
+        l_name = self.base_name + "_" + "{:5d}".format(size_of_labeled_data)
         if self.args.cuda:
             vae = vae.cuda()
             discriminator = discriminator.cuda()
@@ -310,16 +310,16 @@ class Solver:
                                                           optim_vae, optim_discriminator, False)
         # final_accuracy = self.test(task_model)
         final_accuracy = self.test(vae)
-        print('Loaded model with iter {:4d} epochs, test acc reported {:.4f}, val acc reported {:.4f} ,'
-              'got actual test acc with current model using {:2.2f} data is:{:2.2f}'.format(l_iter, l_test_perf, l_val_perf,
-                                                                                  size_of_labeled_data, final_accuracy))
+        print('Loaded model with iter {:4d} epochs, test acc reported {:2.2f}, val acc reported {:2.2f} ,'
+              'got actual test acc with current model using {:5d} data is:{:2.2f}'.format(l_iter, l_test_perf,
+                                                                                          l_val_perf,
+                                                                                          size_of_labeled_data,
+                                                                                          final_accuracy))
         return final_accuracy
 
-    def load_and_see_few_iamges(self, vae, discriminator, size_of_labeled_data):
-        optim_vae = optim.Adam(vae.parameters(), lr=5e-4)
+    def load_and_see_few_iamges(self, vae, discriminator, optim_vae, optim_discriminator, size_of_labeled_data):
         # optim_task_model = optim.SGD(task_model.parameters(), lr=5e-4, weight_decay=5e-4, momentum=0.9)
-        optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
-        l_name = self.base_name + "_" + str(size_of_labeled_data * 100)
+        l_name = self.base_name + "_" + "{:5d}".format(size_of_labeled_data)
         if self.args.cuda:
             vae = vae.cuda()
             vae.eval()
@@ -356,7 +356,7 @@ class Solver:
                 plt.title(data_dict[label[i].item()])
                 if i >= 15:
                     break
-            f.savefig(os.path.join(self.args.out_path, 'image_' + "{:2.2f}".format(size_of_labeled_data*100) + ".pdf"))
+            f.savefig(os.path.join(self.args.out_path, 'image_' + "{:5d}".format(size_of_labeled_data) + ".pdf"))
 
     def validate(self, task_model, loader):
         task_model.eval()

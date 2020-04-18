@@ -173,7 +173,7 @@ class FashionMnistEncoder(nn.Module):
         # self.sample = sample_layer(h_dim[-1] + y_dim, z_dim)
         self.sample = sample_layer(h_dim[-1], z_dim)
 
-    def forward(self, x, y):
+    def forward(self, x, y=None):
         x = self.encoder(x)
         # return self.sample(torch.cat([x, y], dim=-1))
         return self.sample(x)
@@ -255,12 +255,15 @@ class VariationalAutoEncoder(nn.Module):
         """
         super(VariationalAutoEncoder, self).__init__()
 
-        [x_dim, z_dim, h_dim] = dims
+        [x_dim, y_dim, z_dim, h_dim] = dims
         self.z_dim = z_dim
+        self.y_dim = y_dim
         self.flow = None
+        self.dataset = dataset
         if dataset is 'MNIST':
             self.encoder = LinearEncoder([x_dim, h_dim, z_dim])
             self.decoder = LinearDecoder([z_dim, list(reversed(h_dim)), x_dim])
+            self.classifier = LinearClassifier([x_dim, h_dim[0], self.y_dim])
         elif dataset == 'FashionMNIST':
             self.encoder = FashionMnistEncoder([x_dim, h_dim, z_dim, self.y_dim])
             self.decoder = FashionMnistDecoder([x_dim, h_dim, z_dim])
@@ -321,7 +324,13 @@ class VariationalAutoEncoder(nn.Module):
 
         x_mu = self.decoder(z)
 
-        return x_mu
+        return x_mu, z, z_mu, z_log_var
+
+    def classify(self, x):
+        if self.dataset == 'MNIST':
+            x = self.flatten(x)
+        logits = self.classifier(x)
+        return logits
 
     def sample(self, z):
         """
@@ -394,7 +403,7 @@ class DeepGenerativeModel(VariationalAutoEncoder):
         :param dims: dimensions of x, y, z and hidden layers.
         """
         [x_dim, self.y_dim, z_dim, h_dim] = dims
-        super(DeepGenerativeModel, self).__init__([x_dim, z_dim, h_dim], dataset)
+        super(DeepGenerativeModel, self).__init__([x_dim, self.y_dim, z_dim, h_dim], dataset)
 
         self.dataset = dataset
         if dataset == 'MNIST':
@@ -449,6 +458,7 @@ class Discriminator(nn.Module):
     """Adversary architecture(Discriminator) for WAE-GAN."""
     def __init__(self, z_dim=10, class_probs=10):
         super(Discriminator, self).__init__()
+        self.class_probs = class_probs
         self.z_dim = z_dim + class_probs
         # self.z_dim = z_dim
         self.net = nn.Sequential(
@@ -469,6 +479,8 @@ class Discriminator(nn.Module):
                 kaiming_init(m)
 
     def forward(self, z, pred_probability):
+        if self.class_probs == 0:
+            return self.net(z).squeeze()
         z_new = torch.cat((z, pred_probability), dim=1)
         return self.net(z_new).squeeze()
 
